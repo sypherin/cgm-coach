@@ -70,47 +70,48 @@ def save_events(df: pd.DataFrame, path: str) -> None:
 
 @st.cache_data
 def load_libre_data(file):
-    df = pd.read_csv(file)
+    df = pd.read_csv(file, engine="python")
 
-    possible_time_cols = ["Timestamp", "Device Timestamp", "Time", "Date", "DateTime"]
-    time_col = None
-    for c in possible_time_cols:
-        if c in df.columns:
-            time_col = c
-            break
-
-    possible_glucose_cols = [
-        "Glucose Value",
-        "Glucose mg/dL",
-        "Historic Glucose mg/dL",
-        "Scan Glucose mg/dL",
-        "Glucose mmol/L",
+    # find columns
+    time_col = "Device Timestamp"
+    glucose_cols = [
+        "Historic Glucose mmol/L",
+        "Scan Glucose mmol/L",
+        "Strip Glucose mmol/L"
     ]
-    glucose_col = None
-    for c in possible_glucose_cols:
-        if c in df.columns:
-            glucose_col = c
-            break
 
-    if time_col is None or glucose_col is None:
-        raise ValueError(
-            "could not find timestamp or glucose column. check your Libre CSV header names."
-        )
+    # keep only existing glucose columns
+    available_glucose_cols = [c for c in glucose_cols if c in df.columns]
 
-    df = df[[time_col, glucose_col]].copy()
-    df.rename(columns={time_col: "timestamp", glucose_col: "glucose_raw"}, inplace=True)
+    if time_col not in df.columns or not available_glucose_cols:
+        raise ValueError("Could not find expected timestamp or glucose columns in your LibreView CSV.")
 
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["timestamp"])
+    # melt the glucose columns into long form
+    df_melt = df.melt(
+        id_vars=[time_col],
+        value_vars=available_glucose_cols,
+        var_name="source",
+        value_name="glucose"
+    )
 
-    df["glucose"] = pd.to_numeric(df["glucose_raw"], errors="coerce")
-    df = df.dropna(subset=["glucose"])
+    # drop rows with no glucose
+    df_melt = df_melt.dropna(subset=["glucose"])
 
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    df["date"] = df["timestamp"].dt.date
-    df["hour"] = df["timestamp"].dt.hour + df["timestamp"].dt.minute / 60.0
+    # parse timestamp
+    df_melt["timestamp"] = pd.to_datetime(df_melt[time_col], errors="coerce", dayfirst=True)
+    df_melt = df_melt.dropna(subset=["timestamp"])
 
-    return df
+    # convert glucose to float
+    df_melt["glucose"] = pd.to_numeric(df_melt["glucose"], errors="coerce")
+    df_melt = df_melt.dropna(subset=["glucose"])
+
+    # clean up
+    df_melt = df_melt.sort_values("timestamp").reset_index(drop=True)
+    df_melt["date"] = df_melt["timestamp"].dt.date
+    df_melt["hour"] = df_melt["timestamp"].dt.hour + df_melt["timestamp"].dt.minute / 60.0
+
+    return df_melt
+
 
 
 def compute_cgm_metrics(df, target_low, target_high):
