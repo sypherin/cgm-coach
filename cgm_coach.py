@@ -1,15 +1,17 @@
 import os
-from datetime import datetime, date, time as dtime, timedelta
+from datetime import datetime, date as dt_date, time as dt_time, timedelta
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
-# streamlit config
+# ------------------------
+# streamlit + supabase setup
+# ------------------------
+
 st.set_page_config(page_title="metabolic coach (supabase)", layout="wide")
 
-# env vars for supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
@@ -17,45 +19,51 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("SUPABASE_URL and SUPABASE_ANON_KEY must be set as environment variables.")
     st.stop()
 
-# supabase client
+
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+
 supabase = get_supabase()
+
+# ------------------------
+# ui header
+# ------------------------
 
 st.title("metabolic coach v2 (supabase)")
 
 st.markdown(
     """
-this version stores everything in supabase:
+this app stores everything in supabase:
 
-- glucose readings from your LibreView CSV
-- events (Meiji Meibalance, meals, snacks)
+- glucose readings from your LibreView CSV (mmol/L)
+- events (meals, snacks, Meiji Meibalance, drinks)
 
 you can:
-
 - upload glucose data once per sensor cycle
 - log food and drinks from any device
 - see the same data on laptop and phone
 """
 )
 
+# ------------------------
 # sidebar settings
+# ------------------------
+
 st.sidebar.header("settings")
 
-user_id = st.sidebar.text_input("user id", value="zach")
-if not user_id.strip():
+user_id = st.sidebar.text_input("user id", value="zach").strip()
+if not user_id:
     st.sidebar.error("user id cannot be empty.")
     st.stop()
-user_id = user_id.strip()
 
-unit = st.sidebar.selectbox("glucose unit", ["mmol/L", "mg/dL"])
+unit = st.sidebar.selectbox("display glucose unit", ["mmol/L", "mg/dL"])
 
-# your Libre export is mmol/L; app can still show values as mg/dL if needed later
+# note: source data is mmol/L, but you can view in mg/dL later if you want
 if unit == "mg/dL":
-    target_low = st.sidebar.number_input("target low", value=70)
-    target_high = st.sidebar.number_input("target high", value=180)
+    target_low = st.sidebar.number_input("target low", value=70.0)
+    target_high = st.sidebar.number_input("target high", value=180.0)
 else:
     target_low = st.sidebar.number_input("target low", value=3.9)
     target_high = st.sidebar.number_input("target high", value=10.0)
@@ -69,11 +77,15 @@ st.sidebar.divider()
 st.sidebar.write(f"current user: **{user_id}**")
 
 
+# ------------------------
+# supabase helpers
+# ------------------------
+
 def parse_libre_csv_to_df(file) -> pd.DataFrame:
     """
-    parse your LibreView glucose CSV into a long dataframe:
-    columns: timestamp, glucose, source, date, hour
-    assumes mmol/L columns like:
+    parse LibreView CSV (mmol/L) into a long dataframe with:
+    timestamp, glucose, source, date, hour
+    expects columns:
     - Device Timestamp
     - Historic Glucose mmol/L
     - Scan Glucose mmol/L
@@ -91,7 +103,8 @@ def parse_libre_csv_to_df(file) -> pd.DataFrame:
 
     if time_col not in df.columns or not available_glucose_cols:
         raise ValueError(
-            "could not find expected 'Device Timestamp' or glucose mmol/L columns in your LibreView CSV."
+            "could not find 'Device Timestamp' or any mmol/L glucose columns "
+            "(Historic / Scan / Strip) in your LibreView CSV."
         )
 
     df_melt = df.melt(
@@ -102,7 +115,6 @@ def parse_libre_csv_to_df(file) -> pd.DataFrame:
     )
 
     df_melt = df_melt.dropna(subset=["glucose"])
-    # dayfirst=True for formats like 16-11-2025
     df_melt["timestamp"] = pd.to_datetime(
         df_melt[time_col], errors="coerce", dayfirst=True
     )
@@ -113,22 +125,28 @@ def parse_libre_csv_to_df(file) -> pd.DataFrame:
 
     df_melt = df_melt.sort_values("timestamp").reset_index(drop=True)
     df_melt["date"] = df_melt["timestamp"].dt.date
-    df_melt["hour"] = df_melt["timestamp"].dt.hour + df_melt["timestamp"].dt.minute / 60.0
+    df_melt["hour"] = (
+        df_melt["timestamp"].dt.hour + df_melt["timestamp"].dt.minute / 60.0
+    )
 
     return df_melt[["timestamp", "glucose", "source", "date", "hour"]]
 
 
 def upsert_glucose_data(user_id: str, glucose_df: pd.DataFrame):
     """
-    clear old glucose data for this user and insert new rows.
+    clear old glucose rows for user_id and insert new ones
+    into glucose_readings table.
+    expected schema:
+    - user_id text
+    - timestamp timestamptz
+    - glucose double precision
+    - source text
     """
     if glucose_df.empty:
         return
 
-    # delete old rows for this user
     supabase.table("glucose_readings").delete().eq("user_id", user_id).execute()
 
-    # prepare records
     records = []
     for _, row in glucose_df.iterrows():
         records.append(
@@ -140,7 +158,6 @@ def upsert_glucose_data(user_id: str, glucose_df: pd.DataFrame):
             }
         )
 
-    # insert in chunks to avoid payload limits
     chunk_size = 500
     for i in range(0, len(records), chunk_size):
         chunk = records[i : i + chunk_size]
@@ -148,12 +165,9 @@ def upsert_glucose_data(user_id: str, glucose_df: pd.DataFrame):
 
 
 def fetch_glucose_df(user_id: str) -> pd.DataFrame:
-    """
-    fetch glucose readings from supabase for this user.
-    """
     res = (
         supabase.table("glucose_readings")
-        .select("*")
+        .select("timestamp, glucose, source")
         .eq("user_id", user_id)
         .order("timestamp", desc=False)
         .execute()
@@ -167,19 +181,17 @@ def fetch_glucose_df(user_id: str) -> pd.DataFrame:
     df = df.dropna(subset=["timestamp"])
     df["glucose"] = pd.to_numeric(df["glucose"], errors="coerce")
     df = df.dropna(subset=["glucose"])
+
     df["date"] = df["timestamp"].dt.date
     df["hour"] = df["timestamp"].dt.hour + df["timestamp"].dt.minute / 60.0
     df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    return df[["timestamp", "glucose", "source", "date", "hour"]]
 
 
 def fetch_events_df(user_id: str) -> pd.DataFrame:
-    """
-    fetch events for this user.
-    """
     res = (
         supabase.table("events")
-        .select("*")
+        .select("timestamp, label, tags")
         .eq("user_id", user_id)
         .order("timestamp", desc=False)
         .execute()
@@ -198,9 +210,6 @@ def fetch_events_df(user_id: str) -> pd.DataFrame:
 
 
 def log_event(user_id: str, ts: datetime, label: str, tags: str):
-    """
-    insert a new event into supabase.
-    """
     supabase.table("events").insert(
         {
             "user_id": user_id,
@@ -210,20 +219,37 @@ def log_event(user_id: str, ts: datetime, label: str, tags: str):
         }
     ).execute()
 
-def update_event(event_id: str, ts: datetime, label: str, tags: str):
+
+def update_event(
+    user_id: str,
+    original_ts: datetime,
+    original_label: str,
+    new_ts: datetime,
+    new_label: str,
+    new_tags: str,
+):
     supabase.table("events").update(
         {
-            "timestamp": ts.isoformat(),
-            "label": label,
-            "tags": tags,
+            "timestamp": new_ts.isoformat(),
+            "label": new_label,
+            "tags": new_tags,
         }
-    ).eq("id", event_id).execute()
+    ).eq("user_id", user_id).eq("timestamp", original_ts.isoformat()).eq(
+        "label", original_label
+    ).execute()
 
 
-def delete_event(event_id: str):
-    supabase.table("events").delete().eq("id", event_id).execute()
+def delete_event(user_id: str, original_ts: datetime, original_label: str):
+    supabase.table("events").delete().eq("user_id", user_id).eq(
+        "timestamp", original_ts.isoformat()
+    ).eq("label", original_label).execute()
 
-def compute_cgm_metrics(df, target_low, target_high):
+
+# ------------------------
+# analysis helpers
+# ------------------------
+
+def compute_cgm_metrics(df: pd.DataFrame, target_low: float, target_high: float):
     total_points = len(df)
     if total_points == 0:
         return {}
@@ -234,11 +260,11 @@ def compute_cgm_metrics(df, target_low, target_high):
 
     overall = {
         "total_points": total_points,
-        "time_in_range_pct": len(in_range) / total_points * 100,
-        "low_pct": len(low) / total_points * 100,
-        "high_pct": len(high) / total_points * 100,
-        "mean_glucose": df["glucose"].mean(),
-        "std_glucose": df["glucose"].std(),
+        "time_in_range_pct": len(in_range) / total_points * 100 if total_points else 0,
+        "low_pct": len(low) / total_points * 100 if total_points else 0,
+        "high_pct": len(high) / total_points * 100 if total_points else 0,
+        "mean_glucose": df["glucose"].mean() if total_points else 0,
+        "std_glucose": df["glucose"].std() if total_points else 0,
     }
 
     daily = df.groupby("date").agg(
@@ -251,9 +277,7 @@ def compute_cgm_metrics(df, target_low, target_high):
     tir_list = []
     for d, group in df.groupby("date"):
         total = len(group)
-        tir = group[
-            (group["glucose"] >= target_low) & (group["glucose"] <= target_high)
-        ]
+        tir = group[(group["glucose"] >= target_low) & (group["glucose"] <= target_high)]
         tir_pct = len(tir) / total * 100 if total > 0 else 0
         tir_list.append({"date": d, "time_in_range_pct": tir_pct})
 
@@ -276,7 +300,9 @@ def compute_cgm_metrics(df, target_low, target_high):
     return {"overall": overall, "daily": daily}
 
 
-def compute_event_impacts(cgm_df, events_df, window_hours):
+def compute_event_impacts(
+    cgm_df: pd.DataFrame, events_df: pd.DataFrame, window_hours: float
+):
     if events_df is None or events_df.empty or cgm_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -344,7 +370,7 @@ def compute_event_impacts(cgm_df, events_df, window_hours):
     return events_metrics, summary
 
 
-def compute_time_of_day_sensitivity(cgm_df):
+def compute_time_of_day_sensitivity(cgm_df: pd.DataFrame):
     if cgm_df is None or cgm_df.empty:
         return pd.DataFrame()
     df = cgm_df.copy()
@@ -356,7 +382,9 @@ def compute_time_of_day_sensitivity(cgm_df):
     return by_hour
 
 
-def generate_coaching_summary(cgm_metrics, event_summary, unit, target_low, target_high):
+def generate_coaching_summary(
+    cgm_metrics, event_summary, unit: str, target_low: float, target_high: float
+):
     if not cgm_metrics:
         return "no data to summarise."
 
@@ -385,7 +413,8 @@ def generate_coaching_summary(cgm_metrics, event_summary, unit, target_low, targ
         best_row = daily.sort_values("day_score", ascending=False).iloc[0]
         worst_row = daily.sort_values("day_score", ascending=True).iloc[0]
         parts.append(
-            f"your best day was {best_row['date']} with a day score of {best_row['day_score']:.0f} and time in range {best_row['time_in_range_pct']:.1f} percent."
+            f"your best day was {best_row['date']} with a day score of {best_row['day_score']:.0f} "
+            f"and time in range {best_row['time_in_range_pct']:.1f} percent."
         )
         parts.append(
             f"the most challenging day was {worst_row['date']} with a day score of {worst_row['day_score']:.0f}."
@@ -417,8 +446,11 @@ def generate_coaching_summary(cgm_metrics, event_summary, unit, target_low, targ
     return " ".join(parts)
 
 
-# 1. upload glucose data into supabase (optional each visit)
-st.subheader("step 1. upload LibreView glucose CSV (mmol/L) to sync with supabase")
+# ------------------------
+# step 1. upload Libre CSV to sync glucose
+# ------------------------
+
+st.subheader("step 1. upload LibreView CSV (mmol/L) to sync glucose into supabase")
 
 libre_file = st.file_uploader("LibreView CSV", type=["csv"], key="glucose_csv")
 
@@ -426,17 +458,21 @@ if libre_file is not None:
     try:
         parsed_df = parse_libre_csv_to_df(libre_file)
         upsert_glucose_data(user_id, parsed_df)
-        st.success(f"synced {len(parsed_df)} glucose readings to supabase for user {user_id}.")
+        st.success(
+            f"synced {len(parsed_df)} glucose readings to supabase for user '{user_id}'."
+        )
     except Exception as e:
         st.error(f"error parsing or syncing LibreView CSV: {e}")
 
 st.markdown(
-    "if you already uploaded your CSV before for this user id, you can skip this and just scroll down."
+    "if you already uploaded glucose data for this user id before, you can skip this step and just scroll down."
 )
-
 st.divider()
 
-# 2. logging UI
+# ------------------------
+# step 2. log events
+# ------------------------
+
 st.subheader("step 2. log food and drinks")
 
 events_df = fetch_events_df(user_id)
@@ -460,7 +496,7 @@ with st.form("log_event_form"):
     submitted = st.form_submit_button("add event")
 
     if submitted:
-        ts = datetime.combine(date_val, time_val)  # use picker
+        ts = datetime.combine(date_val, time_val)
 
         if preset == "custom" and custom_label.strip():
             label_val = custom_label.strip()
@@ -477,56 +513,78 @@ st.markdown("recent events")
 if events_df.empty:
     st.info("no events logged yet.")
 else:
-    # show simple table
     st.dataframe(events_df[["timestamp", "label", "tags"]].head(30))
 
     st.subheader("edit or delete an event")
 
-    # build dropdown options
+    ev_with_idx = events_df.reset_index()  # adds 'index' column
     options = [
-        f"{row['timestamp'].strftime('%Y-%m-%d %H:%M')} - {row['label']} ({row['id']})"
-        for _, row in events_df.iterrows()
+        f"{row['index']}: {row['timestamp'].strftime('%Y-%m-%d %H:%M')} - {row['label']}"
+        for _, row in ev_with_idx.iterrows()
     ]
 
     selected = st.selectbox("choose event to edit", options) if options else None
 
     if selected:
-        # extract id from the text "(<id>)"
-        event_id = selected.split("(")[-1].strip(")")
+        idx_str = selected.split(":", 1)[0]
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            idx = 0
 
-        ev = events_df[events_df["id"] == event_id].iloc[0]
+        if 0 <= idx < len(events_df):
+            ev = events_df.iloc[idx]
 
-        col_edate, col_etime = st.columns(2)
-        edit_date = col_edate.date_input(
-            "date", value=ev["timestamp"].date(), key="edit_date"
-        )
-        edit_time = col_etime.time_input(
-            "time", value=ev["timestamp"].time(), key="edit_time"
-        )
+            col_edate, col_etime = st.columns(2)
+            edit_date = col_edate.date_input(
+                "edit date", value=ev["timestamp"].date(), key="edit_date"
+            )
+            edit_time = col_etime.time_input(
+                "edit time", value=ev["timestamp"].time(), key="edit_time"
+            )
 
-        edit_label = st.text_input("label", value=ev["label"], key="edit_label")
-        edit_tags = st.text_input("tags", value=ev["tags"], key="edit_tags")
+            edit_label = st.text_input(
+                "edit label", value=ev["label"], key="edit_label"
+            )
+            edit_tags = st.text_input(
+                "edit tags", value=ev["tags"], key="edit_tags"
+            )
 
-        c1, c2 = st.columns(2)
-        if c1.button("save changes"):
-            new_ts = datetime.combine(edit_date, edit_time)
-            update_event(event_id, new_ts, edit_label.strip(), edit_tags.strip())
-            st.success("event updated.")
-            events_df = fetch_events_df(user_id)
+            c1, c2 = st.columns(2)
+            if c1.button("save changes"):
+                new_ts = datetime.combine(edit_date, edit_time)
+                update_event(
+                    user_id,
+                    original_ts=ev["timestamp"],
+                    original_label=ev["label"],
+                    new_ts=new_ts,
+                    new_label=edit_label.strip(),
+                    new_tags=edit_tags.strip(),
+                )
+                st.success("event updated.")
+                events_df = fetch_events_df(user_id)
 
-        if c2.button("delete event"):
-            delete_event(event_id)
-            st.warning("event deleted.")
-            events_df = fetch_events_df(user_id)
-
+            if c2.button("delete event"):
+                delete_event(
+                    user_id,
+                    original_ts=ev["timestamp"],
+                    original_label=ev["label"],
+                )
+                st.warning("event deleted.")
+                events_df = fetch_events_df(user_id)
 
 st.divider()
 
-# 3. fetch glucose data from supabase for analysis
+# ------------------------
+# step 3. glucose analysis from supabase
+# ------------------------
+
 glucose_df = fetch_glucose_df(user_id)
 
 if glucose_df.empty:
-    st.warning("no glucose data found for this user. upload a LibreView CSV above to sync.")
+    st.warning(
+        "no glucose data found for this user. upload a LibreView CSV above to sync."
+    )
     st.stop()
 
 cgm_metrics = compute_cgm_metrics(glucose_df, target_low, target_high)
@@ -548,7 +606,9 @@ st.dataframe(daily.sort_values("date", ascending=False))
 
 st.subheader("daily glucose chart")
 unique_dates = sorted(glucose_df["date"].unique())
-selected_date = st.selectbox("select a date", unique_dates, index=len(unique_dates) - 1)
+selected_date = st.selectbox(
+    "select a date", unique_dates, index=len(unique_dates) - 1
+)
 day_data = glucose_df[glucose_df["date"] == selected_date]
 
 fig, ax = plt.subplots(figsize=(10, 4))
@@ -602,4 +662,4 @@ summary_text = generate_coaching_summary(
 )
 st.write(summary_text)
 
-st.caption("metabolic coach v2 (supabase). glucose and events stored per user id.")
+st.caption("metabolic coach v2 (supabase). glucose + events stored per user id.")
