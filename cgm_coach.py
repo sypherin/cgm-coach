@@ -210,6 +210,18 @@ def log_event(user_id: str, ts: datetime, label: str, tags: str):
         }
     ).execute()
 
+def update_event(event_id: str, ts: datetime, label: str, tags: str):
+    supabase.table("events").update(
+        {
+            "timestamp": ts.isoformat(),
+            "label": label,
+            "tags": tags,
+        }
+    ).eq("id", event_id).execute()
+
+
+def delete_event(event_id: str):
+    supabase.table("events").delete().eq("id", event_id).execute()
 
 def compute_cgm_metrics(df, target_low, target_high):
     total_points = len(df)
@@ -439,13 +451,7 @@ with st.form("log_event_form"):
 
     preset = st.selectbox(
         "quick label",
-        [
-            "Meiji Meibalance",
-            "meal",
-            "snack",
-            "drink",
-            "custom",
-        ],
+        ["Meiji Meibalance", "meal", "snack", "drink", "custom"],
     )
     custom_label = st.text_input("label detail (eg. ramen, rice, etc)", "")
 
@@ -454,7 +460,8 @@ with st.form("log_event_form"):
     submitted = st.form_submit_button("add event")
 
     if submitted:
-        ts = datetime.combine(date_val, time_val)
+        ts = datetime.combine(date_val, time_val)  # use picker
+
         if preset == "custom" and custom_label.strip():
             label_val = custom_label.strip()
         elif preset != "custom" and custom_label.strip():
@@ -464,14 +471,54 @@ with st.form("log_event_form"):
 
         log_event(user_id, ts, label_val, tags_val)
         st.success(f"event logged: {label_val} at {ts.isoformat()}")
-        # refresh events
         events_df = fetch_events_df(user_id)
 
 st.markdown("recent events")
 if events_df.empty:
     st.info("no events logged yet.")
 else:
-    st.dataframe(events_df.head(20))
+    # show simple table
+    st.dataframe(events_df[["timestamp", "label", "tags"]].head(30))
+
+    st.subheader("edit or delete an event")
+
+    # build dropdown options
+    options = [
+        f"{row['timestamp'].strftime('%Y-%m-%d %H:%M')} - {row['label']} ({row['id']})"
+        for _, row in events_df.iterrows()
+    ]
+
+    selected = st.selectbox("choose event to edit", options) if options else None
+
+    if selected:
+        # extract id from the text "(<id>)"
+        event_id = selected.split("(")[-1].strip(")")
+
+        ev = events_df[events_df["id"] == event_id].iloc[0]
+
+        col_edate, col_etime = st.columns(2)
+        edit_date = col_edate.date_input(
+            "date", value=ev["timestamp"].date(), key="edit_date"
+        )
+        edit_time = col_etime.time_input(
+            "time", value=ev["timestamp"].time(), key="edit_time"
+        )
+
+        edit_label = st.text_input("label", value=ev["label"], key="edit_label")
+        edit_tags = st.text_input("tags", value=ev["tags"], key="edit_tags")
+
+        c1, c2 = st.columns(2)
+        if c1.button("save changes"):
+            new_ts = datetime.combine(edit_date, edit_time)
+            update_event(event_id, new_ts, edit_label.strip(), edit_tags.strip())
+            st.success("event updated.")
+            events_df = fetch_events_df(user_id)
+
+        if c2.button("delete event"):
+            delete_event(event_id)
+            st.warning("event deleted.")
+            events_df = fetch_events_df(user_id)
+
 
 st.divider()
 
