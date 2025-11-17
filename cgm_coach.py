@@ -506,8 +506,8 @@ with st.form("log_event_form"):
             label_val = preset
 
         log_event(user_id, ts, label_val, tags_val)
-        st.success(f"event logged: {label_val} at {ts.isoformat()}")
-        events_df = fetch_events_df(user_id)
+        st.success(f"event logged: {label_val} at {ts.strftime('%Y-%m-%d %H:%M:%S')}")
+        st.rerun()
 
 st.markdown("recent events")
 if events_df.empty:
@@ -537,17 +537,17 @@ else:
 
             col_edate, col_etime = st.columns(2)
             edit_date = col_edate.date_input(
-                "edit date", value=ev["timestamp"].date(), key="edit_date"
+                "edit date", value=ev["timestamp"].date(), key=f"edit_date_{idx}"
             )
             edit_time = col_etime.time_input(
-                "edit time", value=ev["timestamp"].time(), key="edit_time"
+                "edit time", value=ev["timestamp"].time(), key=f"edit_time_{idx}"
             )
 
             edit_label = st.text_input(
-                "edit label", value=ev["label"], key="edit_label"
+                "edit label", value=ev["label"], key=f"edit_label_{idx}"
             )
             edit_tags = st.text_input(
-                "edit tags", value=ev["tags"], key="edit_tags"
+                "edit tags", value=ev["tags"], key=f"edit_tags_{idx}"
             )
 
             c1, c2 = st.columns(2)
@@ -562,7 +562,7 @@ else:
                     new_tags=edit_tags.strip(),
                 )
                 st.success("event updated.")
-                events_df = fetch_events_df(user_id)
+                st.rerun()
 
             if c2.button("delete event"):
                 delete_event(
@@ -571,7 +571,7 @@ else:
                     original_label=ev["label"],
                 )
                 st.warning("event deleted.")
-                events_df = fetch_events_df(user_id)
+                st.rerun()
 
 st.divider()
 
