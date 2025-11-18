@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, date as dt_date, time as dt_time, timedelta
+from zoneinfo import ZoneInfo
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -478,11 +479,14 @@ st.subheader("step 2. log food and drinks")
 events_df = fetch_events_df(user_id)
 
 with st.form("log_event_form"):
-    now = datetime.now()
+    # Get current time in Singapore timezone
+    singapore_tz = ZoneInfo("Asia/Singapore")
+    now_sg = datetime.now(singapore_tz)
+
     col_date, col_time = st.columns(2)
-    date_val = col_date.date_input("date", value=now.date())
+    date_val = col_date.date_input("date", value=now_sg.date())
     time_val = col_time.time_input(
-        "time", value=now.time().replace(second=0, microsecond=0)
+        "time (Singapore time)", value=now_sg.time().replace(second=0, microsecond=0)
     )
 
     preset = st.selectbox(
@@ -496,7 +500,8 @@ with st.form("log_event_form"):
     submitted = st.form_submit_button("add event")
 
     if submitted:
-        ts = datetime.combine(date_val, time_val)
+        # Combine date and time as Singapore timezone
+        ts = datetime.combine(date_val, time_val, tzinfo=singapore_tz)
 
         if preset == "custom" and custom_label.strip():
             label_val = custom_label.strip()
@@ -535,12 +540,22 @@ else:
         if 0 <= idx < len(events_df):
             ev = events_df.iloc[idx]
 
+            # Use Singapore timezone for editing
+            singapore_tz = ZoneInfo("Asia/Singapore")
+
+            # Convert event timestamp to Singapore time for display
+            ev_ts = ev["timestamp"]
+            if ev_ts.tzinfo is None:
+                ev_ts = ev_ts.replace(tzinfo=singapore_tz)
+            else:
+                ev_ts = ev_ts.astimezone(singapore_tz)
+
             col_edate, col_etime = st.columns(2)
             edit_date = col_edate.date_input(
-                "edit date", value=ev["timestamp"].date(), key=f"edit_date_{idx}"
+                "edit date", value=ev_ts.date(), key=f"edit_date_{idx}"
             )
             edit_time = col_etime.time_input(
-                "edit time", value=ev["timestamp"].time(), key=f"edit_time_{idx}"
+                "edit time (Singapore time)", value=ev_ts.time(), key=f"edit_time_{idx}"
             )
 
             edit_label = st.text_input(
@@ -552,7 +567,8 @@ else:
 
             c1, c2 = st.columns(2)
             if c1.button("save changes"):
-                new_ts = datetime.combine(edit_date, edit_time)
+                # Combine with Singapore timezone
+                new_ts = datetime.combine(edit_date, edit_time, tzinfo=singapore_tz)
                 update_event(
                     user_id,
                     original_ts=ev["timestamp"],
